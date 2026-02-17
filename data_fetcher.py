@@ -3,18 +3,16 @@ import numpy as np
 import lightkurve as lk
 from astroquery.simbad import Simbad
 
-# Отключаем надоедливые предупреждения о переименовании колонок (мы их уже учли)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 def get_star_metadata(star_name):
     """
-    Получает V, I и параллакс, используя новые имена колонок Simbad (2024+).
+    Скачивает фотометрию в Optical (V, I) и Infrared (J, K) диапазонах.
     """
-    # Сброс и настройка полей
     Simbad.reset_votable_fields()
-    # Запрашиваем данные (Simbad вернет их в колонках 'V', 'I', 'plx_value')
-    Simbad.add_votable_fields('flux(V)', 'flux(I)', 'plx')
+    # Запрашиваем V, I (оптика) и J, K (инфракрасный 2MASS)
+    Simbad.add_votable_fields('flux(V)', 'flux(I)', 'flux(J)', 'flux(K)', 'plx')
 
     try:
         table = Simbad.query_object(star_name)
@@ -22,56 +20,42 @@ def get_star_metadata(star_name):
             print(f"Simbad: Объект {star_name} не найден.")
             return None
 
-        # --- ИЗВЛЕЧЕНИЕ ДАННЫХ ПО ТОЧНЫМ ИМЕНАМ ---
-
-        # 1. Видимая величина V
-        if 'V' in table.colnames and not np.ma.is_masked(table['V'][0]):
-            v_mag = float(table['V'][0])
-        else:
-            print(f"Simbad: У звезды {star_name} нет данных V.")
+        # Вспомогательная функция для извлечения
+        def get_val(col_name):
+            if col_name in table.colnames and not np.ma.is_masked(table[col_name][0]):
+                return float(table[col_name][0])
             return None
 
-        # 2. Инфракрасная величина I
-        if 'I' in table.colnames and not np.ma.is_masked(table['I'][0]):
-            i_mag = float(table['I'][0])
-        else:
-            # Попробуем альтернативу: иногда I называют 'R_I' или 'J'
-            # Но для метода Везенайта строго нужен I.
-            print(f"Simbad: У звезды {star_name} нет данных I (нужны для Wesenheit).")
-            return None
-
-        # 3. Параллакс (plx_value)
-        plx = np.nan
-        if 'plx_value' in table.colnames and not np.ma.is_masked(table['plx_value'][0]):
-            plx = float(table['plx_value'][0])
-
-        return {
-            "v_mag": v_mag,
-            "i_mag": i_mag,
-            "parallax_mas": plx
+        # Собираем всё, что есть
+        data = {
+            "v_mag": get_val('V'),
+            "i_mag": get_val('I'),
+            "j_mag": get_val('J'),  # Инфракрасный 1.2 мкм
+            "k_mag": get_val('K'),  # Инфракрасный 2.2 мкм
+            "parallax_mas": get_val('plx_value')
         }
 
+        # Проверка: если вообще ничего нет
+        if all(v is None for v in [data['v_mag'], data['j_mag']]):
+            print(f"CRITICAL: У {star_name} нет ни оптической, ни ИК фотометрии.")
+            return None
+
+        return data
+
     except Exception as e:
-        print(f"Ошибка соединения с Simbad для {star_name}: {e}")
+        print(f"Ошибка Simbad для {star_name}: {e}")
         return None
 
 
 def download_lightcurve(star_name):
-    """
-    Скачивание данных Kepler/TESS.
-    """
+    """Скачивание данных Kepler/TESS."""
     try:
-        # Приоритет: Kepler
         search = lk.search_lightcurve(star_name, mission='Kepler', author='Kepler')
-        # Если нет — TESS
         if len(search) == 0:
             search = lk.search_lightcurve(star_name, mission='TESS', author='SPOC')
 
         if len(search) == 0:
             return None
-
-        # Берем самый длинный сет данных
-        lc = search[0].download()
-        return lc
-    except Exception as e:
+        return search[0].download()
+    except:
         return None
