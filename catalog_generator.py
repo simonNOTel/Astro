@@ -84,7 +84,7 @@ def get_final_catalog():
         print("-" * 40)
 
         # 5. Сохранение
-        filename = 'my_stars_data.csv'
+        filename = 'candidates_list.csv'
         df.to_csv(filename, index=False)
         print(f"Файл сохранен: {filename}")
 
