@@ -2,60 +2,103 @@ import warnings
 import numpy as np
 import lightkurve as lk
 from astroquery.simbad import Simbad
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+# Игнорируем специфические предупреждения
+warnings.filterwarnings("ignore")
 
 
-def get_star_metadata(star_name):
+def get_star_metadata(star_name, ra=None, dec=None):
     """
-    Скачивает фотометрию в Optical (V, I) и Infrared (J, K) диапазонах.
+    Скачивает фотометрию.
+    Если переданы RA/DEC, ищет по координатам (это надежнее).
+    Иначе ищет по имени.
     """
     Simbad.reset_votable_fields()
-    # Запрашиваем V, I (оптика) и J, K (инфракрасный 2MASS)
     Simbad.add_votable_fields('flux(V)', 'flux(I)', 'flux(J)', 'flux(K)', 'plx')
 
     try:
-        table = Simbad.query_object(star_name)
+        table = None
+
+        # 1. Приоритет: Поиск по координатам (Radius 5 arcsec)
+        if ra is not None and dec is not None:
+            try:
+                coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+                # Ищем ближайший объект в радиусе 5 секунд
+                table = Simbad.query_region(coords, radius=5 * u.arcsec)
+            except:
+                table = None
+
+        # 2. Если по координатам пусто, пробуем по имени
         if table is None:
-            print(f"Simbad: Объект {star_name} не найден.")
+            table = Simbad.query_object(star_name)
+
+        if table is None:
             return None
 
-        # Вспомогательная функция для извлечения
+        # Берем первую строку (самый близкий объект)
+        row = table[0]
+
         def get_val(col_name):
-            if col_name in table.colnames and not np.ma.is_masked(table[col_name][0]):
-                return float(table[col_name][0])
+            if col_name in table.colnames and not np.ma.is_masked(row[col_name]):
+                return float(row[col_name])
             return None
 
-        # Собираем всё, что есть
         data = {
-            "v_mag": get_val('V'),
-            "i_mag": get_val('I'),
-            "j_mag": get_val('J'),  # Инфракрасный 1.2 мкм
-            "k_mag": get_val('K'),  # Инфракрасный 2.2 мкм
-            "parallax_mas": get_val('plx_value')
+            "v_mag": get_val('FLUX_V'),  # Simbad возвращает FLUX_V при query_region
+            "i_mag": get_val('FLUX_I'),
+            "j_mag": get_val('FLUX_J'),
+            "k_mag": get_val('FLUX_K'),
+            "parallax_mas": get_val('PLX_VALUE')
         }
 
-        # Проверка: если вообще ничего нет
-        if all(v is None for v in [data['v_mag'], data['j_mag']]):
-            print(f"CRITICAL: У {star_name} нет ни оптической, ни ИК фотометрии.")
-            return None
+        # Если ключи называются иначе (иногда бывает V вместо FLUX_V при поиске по имени)
+        if data['v_mag'] is None: data['v_mag'] = get_val('V')
+        if data['i_mag'] is None: data['i_mag'] = get_val('I')
+        if data['j_mag'] is None: data['j_mag'] = get_val('J')
+        if data['k_mag'] is None: data['k_mag'] = get_val('K')
 
         return data
 
     except Exception as e:
-        print(f"Ошибка Simbad для {star_name}: {e}")
+        # print(f"Simbad error: {e}")
         return None
 
 
-def download_lightcurve(star_name):
-    """Скачивание данных Kepler/TESS."""
+def download_lightcurve(ra, dec):
+    """
+    Скачивание данных.
+    ВАЖНО: Radius увеличен до 20 arcsec, чтобы попадать в пиксели TESS.
+    """
     try:
-        search = lk.search_lightcurve(star_name, mission='Kepler', author='Kepler')
-        if len(search) == 0:
-            search = lk.search_lightcurve(star_name, mission='TESS', author='SPOC')
+        coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+
+        # УВЕЛИЧИЛИ РАДИУС ДО 20 секунд (было 1-2)
+        search = lk.search_lightcurve(coords, radius=20 * u.arcsec)
 
         if len(search) == 0:
             return None
-        return search[0].download()
-    except:
+
+        # Фильтруем: берем только данные >= 60c (Long Cadence), чтобы не качать гигабайты
+        search = search[search.exptime.value >= 60]
+
+        if len(search) == 0:
+            return None
+
+        # Логика выбора лучшего файла:
+        # 1. Предпочитаем Kepler (данные чище)
+        # 2. Иначе берем TESS
+        best_idx = 0
+        for i, mission in enumerate(search.mission):
+            if 'Kepler' in str(mission) or 'K2' in str(mission):
+                best_idx = i
+                break
+
+        # Скачиваем ТОЛЬКО ОДИН файл
+        lc = search[best_idx].download()
+
+        return lc
+
+    except Exception:
         return None
