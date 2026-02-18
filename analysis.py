@@ -14,7 +14,7 @@ def process_lightcurve(lc):
     return lc
 
 
-def find_period(lc, min_period=0.5, max_period=60):
+def find_period(lc, min_period=0.5, max_period=500):
     """
     Находит период пульсации методом Ломба-Скаргла.
     """
