@@ -1,7 +1,6 @@
 import numpy as np
 import warnings
 
-
 def process_lightcurve(lc):
     """
     Очищает кривую блеска от нанов, выбросов и нормализует её.
@@ -9,14 +8,14 @@ def process_lightcurve(lc):
     # Удаляем пустые значения
     lc = lc.remove_nans()
 
-    # Нормализуем и удаляем выбросы (космические лучи)
+    # Нормализуем и удаляем выбросы (sigma=5 для сохранения реальных пульсаций)
     lc = lc.normalize().remove_outliers(sigma=5)
     return lc
 
-
-def find_period(lc, min_period=0.5, max_period=60):
+def find_period(lc, min_period=0.5, max_period=500):
     """
     Находит период пульсации методом Ломба-Скаргла.
+    Диапазон расширен до 500 дней для долгопериодических звезд.
     """
     # Строим периодограмму
     pg = lc.to_periodogram(method='lombscargle',

@@ -2,60 +2,72 @@ import warnings
 import numpy as np
 import lightkurve as lk
 from astroquery.simbad import Simbad
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore")
 
 
-def get_star_metadata(star_name):
+def get_star_metadata(star_name, ra=None, dec=None):
     """
-    Скачивает фотометрию в Optical (V, I) и Infrared (J, K) диапазонах.
+    Запрашивает V, I, J, K магнитуды и параллакс.
+    Поиск по координатам RA/Dec гораздо надежнее поиска по имени.
     """
     Simbad.reset_votable_fields()
-    # Запрашиваем V, I (оптика) и J, K (инфракрасный 2MASS)
     Simbad.add_votable_fields('flux(V)', 'flux(I)', 'flux(J)', 'flux(K)', 'plx')
 
     try:
-        table = Simbad.query_object(star_name)
+        table = None
+        if ra is not None and dec is not None:
+            coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+            table = Simbad.query_region(coords, radius=5 * u.arcsec)
+
         if table is None:
-            print(f"Simbad: Объект {star_name} не найден.")
-            return None
+            table = Simbad.query_object(star_name)
 
-        # Вспомогательная функция для извлечения
+        if table is None: return None
+
+        row = table[0]
+
         def get_val(col_name):
-            if col_name in table.colnames and not np.ma.is_masked(table[col_name][0]):
-                return float(table[col_name][0])
+            for key in [col_name, f'FLUX_{col_name}', col_name.upper()]:
+                if key in table.colnames and not np.ma.is_masked(row[key]):
+                    return float(row[key])
             return None
 
-        # Собираем всё, что есть
-        data = {
+        return {
             "v_mag": get_val('V'),
             "i_mag": get_val('I'),
-            "j_mag": get_val('J'),  # Инфракрасный 1.2 мкм
-            "k_mag": get_val('K'),  # Инфракрасный 2.2 мкм
-            "parallax_mas": get_val('plx_value')
+            "j_mag": get_val('J'),
+            "k_mag": get_val('K'),
+            "parallax_mas": get_val('PLX_VALUE') or get_val('PLX')
         }
-
-        # Проверка: если вообще ничего нет
-        if all(v is None for v in [data['v_mag'], data['j_mag']]):
-            print(f"CRITICAL: У {star_name} нет ни оптической, ни ИК фотометрии.")
-            return None
-
-        return data
-
-    except Exception as e:
-        print(f"Ошибка Simbad для {star_name}: {e}")
+    except:
         return None
 
 
-def download_lightcurve(star_name):
-    """Скачивание данных Kepler/TESS."""
+def download_lightcurve(ra, dec):
+    """
+    Скачивает кривую блеска по координатам.
+    Радиус 20 arcsec оптимален для TESS.
+    """
     try:
-        search = lk.search_lightcurve(star_name, mission='Kepler', author='Kepler')
-        if len(search) == 0:
-            search = lk.search_lightcurve(star_name, mission='TESS', author='SPOC')
+        coords = SkyCoord(ra, dec, unit=(u.deg, u.deg))
+        search = lk.search_lightcurve(coords, radius=20 * u.arcsec)
 
-        if len(search) == 0:
-            return None
-        return search[0].download()
+        if len(search) == 0: return None
+
+        # Фильтруем длинные экспозиции (>= 60s), чтобы избежать тяжелых данных
+        search = search[search.exptime.value >= 60]
+        if len(search) == 0: return None
+
+        # Приоритет Kepler над TESS
+        best_idx = 0
+        for i, mission in enumerate(search.mission):
+            if 'Kepler' in str(mission):
+                best_idx = i
+                break
+
+        return search[best_idx].download()
     except:
         return None
