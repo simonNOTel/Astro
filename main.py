@@ -3,134 +3,89 @@ import numpy as np
 import os
 import warnings
 from tqdm import tqdm
-import time
 
 import data_fetcher
 import analysis
-import visualizer
 import astrophysics
+import visualizer
 
 warnings.filterwarnings("ignore")
 
-INPUT_FILE = 'my_stars_data.csv'
-OUTPUT_FILE = 'universal_map_large.csv'
-PLOTS_DIR = 'plots/'
+INPUT_FILE = "my_stars_data.csv"
+OUTPUT_FILE = "universal_map_large.csv"
 
-
-def main():
-    if not os.path.exists(PLOTS_DIR):
-        os.makedirs(PLOTS_DIR)
-
-    print(f"--- ЗАПУСК АНАЛИЗА (v2.0 Fixed) ---")
-
-    try:
-        df = pd.read_csv(INPUT_FILE)
-        print(f"Загружено звезд: {len(df)}")
-    except FileNotFoundError:
-        print(f"Файл {INPUT_FILE} не найден.")
+def run_analysis():
+    if not os.path.exists(INPUT_FILE):
+        print(f"Файл {INPUT_FILE} не найден!")
         return
 
-    headers = "name,ra,dec,star_type,period_days,distance_calc,distance_gaia,extinction_Av,method_used,status\n"
-    with open(OUTPUT_FILE, 'w') as f:
-        f.write(headers)
+    candidates = pd.read_csv(INPUT_FILE)
+    
+    # Подготовка файла результатов
+    if not os.path.exists(OUTPUT_FILE):
+        with open(OUTPUT_FILE, 'w') as f:
+            f.write("Star,RA,Dec,Period,Type,Gaia_Dist,Calc_Dist,Dust_Av,Status\n")
 
-    for index, row in tqdm(df.iterrows(), total=df.shape[0], unit="star"):
-        star_name = str(row['name'])
+    print(f"Анализ {len(candidates)} звезд...")
 
+    for index, row in tqdm(candidates.iterrows(), total=len(candidates)):
+        star = str(row['name'])
         try:
-            # 1. Координаты
-            try:
-                ra = float(row['ra'])
-                dec = float(row['dec'])
-                csv_parallax = float(row['parallax']) if 'parallax' in row and not np.isnan(row['parallax']) else None
-                csv_v_mag = float(row['v_mag']) if 'v_mag' in row and not np.isnan(row['v_mag']) else None
-            except:
-                continue
+            ra, dec = float(row['ra']), float(row['dec'])
+            
+            # Проверка спектрального типа: углеродные звезды (C) не являются Цефеидами!
+            sp_type = str(row.get('sp_type', ''))
+            is_carbon = 'C' in sp_type
 
-            # 2. Метаданные (передаем RA/DEC, чтобы Simbad нашел по координатам!)
-            metadata = data_fetcher.get_star_metadata(star_name, ra=ra, dec=dec)
+            meta = data_fetcher.get_star_metadata(star, ra, dec)
+            if not meta: continue
 
-            if metadata:
-                v_mag = metadata['v_mag'] if metadata['v_mag'] else csv_v_mag
-                i_mag = metadata['i_mag']
-                j_mag = metadata['j_mag']
-                k_mag = metadata['k_mag']
-                parallax = csv_parallax if csv_parallax else metadata['parallax_mas']
-            else:
-                v_mag = csv_v_mag
-                i_mag = j_mag = k_mag = None
-                parallax = csv_parallax
+            # Скачивание по координатам
+            raw_lc = data_fetcher.download_lightcurve(ra, dec)
+            if raw_lc is None: continue
 
-            # 3. Скачивание (TESS/Kepler)
-            lc_raw = data_fetcher.download_lightcurve(ra, dec)
-            if lc_raw is None:
-                continue
+            clean_lc = analysis.process_lightcurve(raw_lc)
+            period, pg, power = analysis.find_period(clean_lc)
 
-                # 4. Анализ
-            lc_clean = analysis.process_lightcurve(lc_raw)
-            if lc_clean is None:
-                continue
+            # Сниженный порог мощности для зашумленных данных
+            if power < 0.001: continue
 
-            period, pg, power = analysis.find_period(lc_clean)
-
-            # ИСПРАВЛЕНИЕ: Снизили порог с 0.05 до 0.001
-            # Реальные данные шумные, 0.05 отсеивает почти всё.
-            if power < 0.001:
-                continue
-
-            # 5. Астрофизика
+            # Астрофизические расчеты
             star_type = "Cepheid" if period > 1.0 else "RR Lyrae"
-            dist_gaia = astrophysics.calculate_gaia_distance(parallax)
-
-            dist_calc = None
-            method_used = "Unknown"
-
-            if star_type == "Cepheid":
-                dist_calc, method_used = astrophysics.calculate_cepheid_distance(period, v_mag, i_mag, j_mag, k_mag)
+            
+            # Если это углеродная звезда, пропускаем расчет расстояния по формуле Цефеид
+            if is_carbon and star_type == "Cepheid":
+                dist_calc, method_name = None, "Carbon_Star_Skip"
+            elif star_type == "Cepheid":
+                dist_calc, method_name = astrophysics.calculate_cepheid_distance(
+                    period, meta['v_mag'], meta['i_mag'], meta['j_mag'], meta['k_mag']
+                )
             else:
-                dist_calc, method_used = astrophysics.calculate_rr_lyrae_distance(period, v_mag, k_mag)
+                dist_calc, method_name = astrophysics.calculate_rr_lyrae_distance(
+                    period, meta['v_mag'], meta['k_mag']
+                )
 
-            if dist_calc is None:
-                continue
+            if dist_calc is None: continue
 
-            # 6. Статус
-            status = "Clean"
-            extinction_Av = 0.0
+            d_gaia = astrophysics.calculate_gaia_distance(meta['parallax_mas'])
+            
+            status, av_est = "Normal", 0.0
+            if d_gaia:
+                # Av = 5*log10(D_calc / D_gaia)
+                av_est = 5 * np.log10(dist_calc / d_gaia)
+                if av_est > 0.5: status = "DUST FOUND"
+                elif av_est < -0.5: status = "ANOMALY"
+                else: status = "Clean"
 
-            if dist_gaia is not None and dist_gaia > 0:
-                try:
-                    extinction_Av = 5 * np.log10(dist_calc / dist_gaia)
-                except:
-                    extinction_Av = 0
-
-                if extinction_Av > 0.5:
-                    status = "DUST FOUND"
-                elif extinction_Av < -0.5:
-                    status = "ANOMALY"
-            else:
-                status = "No Gaia Ref"
-
-            # 7. Запись
-            result_line = f"{star_name},{ra},{dec},{star_type},{period:.5f},{dist_calc:.2f}," \
-                          f"{dist_gaia if dist_gaia else ''},{extinction_Av:.3f},{method_used},{status}\n"
+            # Сохранение графиков для подозрительных объектов
+            if status != "Clean":
+                visualizer.save_plots(star, clean_lc, pg, period)
 
             with open(OUTPUT_FILE, 'a') as f:
-                f.write(result_line)
+                f.write(f"{star},{ra},{dec},{period:.4f},{method_name},{d_gaia:.1f if d_gaia else ''},{dist_calc:.1f},{av_est:.2f},{status}\n")
 
-            # 8. Графики
-            if status in ["DUST FOUND", "ANOMALY"]:
-                try:
-                    visualizer.save_plots(star_name, lc_clean, pg, period)
-                except:
-                    pass
-
-        except KeyboardInterrupt:
-            break
-        except Exception:
+        except Exception as e:
             continue
 
-    print(f"\n>>> Готово! Результаты в {OUTPUT_FILE}")
-
-
 if __name__ == "__main__":
-    main()
+    run_analysis()
