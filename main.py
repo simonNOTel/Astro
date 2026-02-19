@@ -6,93 +6,143 @@ from tqdm import tqdm
 
 warnings.filterwarnings("ignore")
 
+# Импорт ваших модулей
 from data_fetcher import download_lightcurve
 from analysis import process_lightcurve, find_period
 from astrophysics import calculate_gaia_distance, calculate_cepheid_distance, calculate_rr_lyrae_distance
 from visualizer import save_plots
 
-INPUT_FILE = "candidates_listold.csv"
+INPUT_FILE = "candidates_list.csv"
 OUTPUT_FILE = "universal_map_large.csv"
 
 
 def run_analysis():
     if not os.path.exists(INPUT_FILE):
-        print(f"Файл {INPUT_FILE} не найден!")
+        print(f"Файл {INPUT_FILE} не найден! Запустите catalog_generator.py или проверьте имя файла.")
         return
 
+    # Загружаем данные
     candidates = pd.read_csv(INPUT_FILE)
 
-    # Авто-поиск колонок (Star/name, Parallax/plx)
-    def find_col(possible):
-        for p in possible:
-            for c in candidates.columns:
-                if c.lower() == p.lower(): return c
+    # --- УЛУЧШЕННЫЙ ПОИСК КОЛОНОК ---
+    def find_col(possible_names):
+        for name in possible_names:
+            for col in candidates.columns:
+                if col.lower() == name.lower():
+                    return col
         return None
 
-    star_col = find_col(['name', 'star', 'main_id'])
-    plx_col = find_col(['parallax', 'plx_value', 'plx'])
+    # Ищем колонку со звездой
+    star_col = find_col(['name', 'Star', 'main_id', 'star'])
+    ra_col = find_col(['ra', 'ra_d'])
+    dec_col = find_col(['dec', 'dec_d'])
 
     if not star_col:
-        print(f"Ошибка: не найдена колонка с именем звезды. Есть: {candidates.columns.tolist()}")
+        print(f"ОШИБКА: Не найдена колонка с названием звезды! Колонки в файле: {candidates.columns.tolist()}")
         return
 
+    total_stars = len(candidates)
+
+    # Подготовка выходного файла
     if not os.path.exists(OUTPUT_FILE):
         with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
             f.write("Star,RA,Dec,Period,Type,Gaia_Dist,Calc_Dist,Dust_Av,Status\n")
-            processed = []
+            already_processed = []
     else:
         try:
-            processed = pd.read_csv(OUTPUT_FILE)['Star'].astype(str).tolist()
+            existing = pd.read_csv(OUTPUT_FILE)
+            already_processed = existing['Star'].astype(str).tolist()
+            print(f"В локальном файле уже обработано {len(already_processed)} звезд.")
         except:
-            processed = []
+            already_processed = []
 
-    print(f"Анализ {len(candidates)} звезд...")
+    print(f"Начинаем ОБРАТНЫЙ анализ {total_stars} звезд (с конца списка)...")
 
-    for _, row in tqdm(candidates.iterrows(), total=len(candidates)):
+    # --- ГЛАВНОЕ ИЗМЕНЕНИЕ: .iloc[::-1] разворачивает таблицу задом наперед ---
+    for index, row in tqdm(candidates.iloc[::-1].iterrows(), total=total_stars):
         star = str(row[star_col])
-        if star in processed: continue
+
+        # Пропускаем уже обработанные на ЭТОЙ машине
+        if star in already_processed:
+            continue
 
         try:
+            ra = row[ra_col] if ra_col else 0
+            dec = row[dec_col] if dec_col else 0
+
+            # Авто-поиск метаданных
+            def get_val(names):
+                c = find_col(names)
+                return row[c] if c and not pd.isna(row[c]) else None
+
             meta = {
-                'v_mag': row.get('v_mag', np.nan),
-                'i_mag': row.get('i_mag', np.nan),
-                'j_mag': row.get('j_mag', np.nan),
-                'k_mag': row.get('k_mag', np.nan),
-                'parallax_mas': row.get(plx_col, np.nan)
+                'v_mag': get_val(['v_mag', 'V']),
+                'i_mag': get_val(['i_mag', 'I']),
+                'j_mag': get_val(['j_mag', 'J']),
+                'k_mag': get_val(['k_mag', 'K']),
+                'parallax_mas': get_val(['parallax', 'parallax_mas', 'plx_value'])
             }
 
-            raw_lc = download_lightcurve(star)
+            # 1. Загрузка данных
+            raw_lc = download_lightcurve(ra, dec)
             if raw_lc is None: continue
 
+            # 2. Поиск периода
             clean_lc = process_lightcurve(raw_lc)
             period, pg, power = find_period(clean_lc)
+
             if power < 0.05: continue
 
-            # Выбор метода
+            # 3. Расчет расстояния
+            dist_calc = None
+            method_name = "---"
+
             if period > 1.0:
-                dist_calc, method = calculate_cepheid_distance(period, meta['v_mag'], meta['i_mag'], meta['j_mag'],
-                                                               meta['k_mag'])
+                dist_calc, method_name = calculate_cepheid_distance(
+                    period, meta['v_mag'], meta['i_mag'], meta['j_mag'], meta['k_mag']
+                )
             else:
-                dist_calc, method = calculate_rr_lyrae_distance(period, meta['v_mag'], meta['k_mag'])
+                dist_calc, method_name = calculate_rr_lyrae_distance(
+                    period, meta['v_mag'], meta['k_mag']
+                )
 
-            if not dist_calc: continue
+            if dist_calc is None: continue
 
+            # 4. Сравнение с Gaia
             d_gaia = calculate_gaia_distance(meta['parallax_mas'])
-            av, status = 0.0, "Normal"
+
+            Av_estimate = 0.0
+            status = "Normal"
+            gaia_str = ""
 
             if d_gaia:
-                av = (5 * np.log10(dist_calc) - 5) - (5 * np.log10(d_gaia) - 5)
-                status = "DUST FOUND" if av > 0.5 else ("ANOMALY" if av < -0.3 else "Clean")
+                mu_calc = 5 * np.log10(dist_calc) - 5
+                mu_gaia = 5 * np.log10(d_gaia) - 5
+                Av_estimate = mu_calc - mu_gaia
 
+                if Av_estimate > 0.5:
+                    status = "DUST FOUND"
+                elif Av_estimate < -0.3:
+                    status = "ANOMALY"
+                else:
+                    status = "Clean"
+                gaia_str = f"{d_gaia:.0f}"
+            else:
+                status = "No Gaia"
+
+            # 5. Сохранение графиков для аномалий
             if status != "Clean":
                 save_plots(star, clean_lc, pg, period)
 
+            # 6. Запись результата (дозапись в конец файла)
             with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
-                f.write(
-                    f"{star},{row.get('ra', 0)},{row.get('dec', 0)},{period:.4f},{method},{d_gaia or 0:.0f},{dist_calc:.0f},{av:.2f},{status}\n")
+                line = f"{star},{ra},{dec},{period:.4f},{method_name},{gaia_str},{dist_calc:.0f},{Av_estimate:.2f},{status}\n"
+                f.write(line)
 
-        except:
+        except Exception as e:
             continue
+
+    print(f"\nГотово! Результаты на ПК (задом наперед) сохранены в {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
