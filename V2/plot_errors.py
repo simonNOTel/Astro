@@ -58,8 +58,8 @@ def plot_error_map(input_file):
     plt.tight_layout()
 
     # 4. Сохраняем картинку
-    plt.savefig('error_map_galactic10000.png', dpi=300)
-    print("Карта успешно сохранена в файл 'error_map_galactic10000.png'!")
+    plt.savefig('error_map_galactic14000.png', dpi=300)
+    print("Карта успешно сохранена в файл 'error_map_galactic14000.png'!")
 
     # Показываем окно с графиком
     plt.show()
