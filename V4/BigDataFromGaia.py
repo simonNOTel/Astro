@@ -6,7 +6,7 @@ def download_unlimited_gaia_dataset():
     print("1. Подключаемся к архиву космического телескопа Gaia (ESA)...")
     print("ВНИМАНИЕ: Сняты все лимиты. Мы качаем Big Data. Это может занять 3-5 минут!")
 
-    # Запрос 1: Ищем ВСЕ качественные Цефеиды
+    # Цефеиды
     query_cep = """
     SELECT 
         s.source_id AS name,
@@ -21,7 +21,7 @@ def download_unlimited_gaia_dataset():
       AND c.pf > 0
     """
 
-    # Запрос 2: Ищем ВСЕ качественные RR Лиры
+    #  RR Лиры
     query_rr = """
     SELECT 
         s.source_id AS name,
