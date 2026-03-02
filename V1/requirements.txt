@@ -6,3 +6,4 @@ tqdm
 lightkurve
 astroquery
 astropy
+plotly
