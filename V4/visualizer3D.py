@@ -7,84 +7,72 @@ import os
 
 
 def create_3d_star_map(input_file):
-    # Проверка наличия файла
     if not os.path.exists(input_file):
-        print(f"❌ Файл '{input_file}' не найден в папке {os.getcwd()}")
+        print(f"❌ Файл {input_file} не найден!")
         return
 
-    print(f"🚀 Читаем данные из {input_file}...")
     df = pd.read_csv(input_file)
 
-    # Чистка данных: убираем строки без координат или расстояния
-    df = df.dropna(subset=['ra', 'dec', 'dist_ref', 'rel_error'])
+    # 1. СТРОГИЙ ФИЛЬТР (как в 2D)
+    # Оставляем только те звезды, где расчеты имеют смысл
+    # Убираем относительную ошибку более 200% и менее -100%
+    df = df[(df['rel_error'] > -100) & (df['rel_error'] < 200)]
 
-    # Фильтруем экстремальные значения для наглядности (до 15 000 пк)
-    df = df[df['dist_ref'] < 15000]
+    # Ограничиваем расстояние до 10 000 пк, чтобы не было "разлета" карты
+    df = df[df['dist_ref'] < 10000]
 
-    print(f"Обработка {len(df)} звезд...")
+    print(f"Число звезд после фильтрации: {len(df)}")
 
-    # 1. Преобразование RA/Dec/Dist -> Галактические X, Y, Z
-    # Мы используем dist_ref (точное расстояние по параллаксу Gaia)
+    # Координаты
     coords = SkyCoord(ra=df['ra'].values * u.degree,
                       dec=df['dec'].values * u.degree,
                       distance=df['dist_ref'].values * u.pc,
                       frame='icrs')
-
     galactic = coords.galactic
-    df['x'] = galactic.cartesian.x.value
-    df['y'] = galactic.cartesian.y.value
-    df['z'] = galactic.cartesian.z.value
+    df['x'], df['y'], df['z'] = galactic.cartesian.x.value, galactic.cartesian.y.value, galactic.cartesian.z.value
 
-    # 2. Создание визуализации
     fig = go.Figure()
 
-    # Основной массив звезд
+    # Основные точки
     fig.add_trace(go.Scatter3d(
         x=df['x'], y=df['y'], z=df['z'],
         mode='markers',
         marker=dict(
-            size=2.5,
+            size=3,
             color=df['rel_error'],
-            colorscale='RdBu_r',  # Красный = большая ошибка (пыль), Синий = норма
-            colorbar=dict(title="Ошибка закона Левитта (%)"),
-            cmid=0,
-            opacity=0.7
+            colorscale='Jet',
+            # ЖЕСТКАЯ ПРИВЯЗКА ШКАЛЫ (как в 2D vmin/vmax)
+            cmin=-50,
+            cmax=150,
+            showscale=True,
+            colorbar=dict(title="Ошибка %", thickness=20),
+            opacity=1  # Делаем точки плотными
         ),
         text=df['name'],
-        hovertemplate=(
-                "<b>Звезда: %{text}</b><br>" +
-                "Расстояние (Gaia): %{customdata:.1f} pc<br>" +
-                "Погрешность: %{marker.color:.1f}%<br>" +
-                "<extra></extra>"
-        ),
-        customdata=df['dist_ref']
+        hovertemplate="ID: %{text}<br>Ошибка: %{marker.color:.1f}%<extra></extra>"
     ))
 
-    # Ставим Солнце в центр
+    # Солнце
     fig.add_trace(go.Scatter3d(
         x=[0], y=[0], z=[0],
         mode='markers',
-        marker=dict(size=6, color='yellow', symbol='diamond'),
-        name='Солнце (Вы здесь)'
+        marker=dict(size=8, color='white', symbol='diamond'),
+        name='Солнце'
     ))
 
-    # Оформление "Космос"
     fig.update_layout(
-        title="3D Карта межзвездного поглощения (на основе ошибок Цефеид и RR Лир)",
+        title="Финальная 3D модель зон экстинкции",
         scene=dict(
-            xaxis=dict(title='X (pc) к центру Галактики', backgroundcolor="black", gridcolor="gray"),
+            xaxis=dict(title='X (pc)', backgroundcolor="black", gridcolor="gray"),
             yaxis=dict(title='Y (pc)', backgroundcolor="black", gridcolor="gray"),
-            zaxis=dict(title='Z (pc) перпендикулярно диску', backgroundcolor="black", gridcolor="gray"),
-            aspectmode='data'  # Сохраняет пропорции расстояний
+            zaxis=dict(title='Z (pc)', backgroundcolor="black", gridcolor="gray"),
+            aspectmode='cube'  # Чтобы визуально не сплющивало Галактику
         ),
         paper_bgcolor='black',
-        font=dict(color='white'),
-        margin=dict(l=0, r=0, b=0, t=40)
+        font=dict(color='white')
     )
 
-    output_name = "stellar_3d_error_map.html"
-    fig.write_html(output_name)
-    print(f"✨ Готово! Открой файл {output_name} в браузере.")
+    fig.write_html("stellar_3d_final.html")
     fig.show()
 
 
